@@ -1,0 +1,88 @@
+@Service
+public class AnsibleExecutionService {
+
+    @Autowired
+    private CyberArkService cyberArkService;
+
+    public String executeCommand(String application, String ip, String command, String os) {
+        try {
+            // Get credentials
+            Map<String, String> credentials = cyberArkService.getCreds(application, os, ip);
+            String user = credentials.get("username");
+            String password = credentials.get("password");
+
+            if (user == null) return "ERROR: Could not retrieve username for server: " + ip;
+            if (password == null) return "ERROR: Could not retrieve password for server: " + ip;
+
+            // Prepare Ansible command
+            return executeAnsibleCommand(user, password, ip, command, os);
+        } catch (Exception e) {
+            StringWriter sw = new StringWriter();
+            e.printStackTrace(new PrintWriter(sw));
+            return "ERROR: Command execution preparation failed: " + e.getMessage() + "\nStack trace: " + sw.toString();
+        }
+    }
+
+    private String executeAnsibleCommand(String user, String password, String ip, String command, String os) {
+        try {
+            String inventory = String.format("%s ansible_user=%s", ip, user);
+            String ansibleCmd;
+
+            if (os.equalsIgnoreCase("windows")) {
+                ansibleCmd = String.format(
+                    "ansible -i <(echo '%s ansible_connection=winrm ansible_port=5985') all -m win_shell -a \"%s\" -vvvv " +
+                    "--extra-vars \"ansible_password=%s ansible_winrm_transport=ntlm ansible_winrm_server_cert_validation=ignore " +
+                    "ansible_winrm_operation_timeout_sec=280 ansible_winrm_read_timeout_sec=300\"",
+                    inventory, command, password
+                );
+            } else {
+                ansibleCmd = String.format(
+                    "ansible -i <(echo '%s ansible_connection=ssh') all -m shell -a \"%s\" -vvvv " +
+                    "--extra-vars \"ansible_ssh_pass=%s\" " +
+                    "--ssh-common-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o ConnectTimeout=30'",
+                    inventory, command, password
+                );
+            }
+
+            // Execute command
+            return runCommand(ansibleCmd);
+        } catch (Exception e) {
+            StringWriter sw = new StringWriter();
+            e.printStackTrace(new PrintWriter(sw));
+            return "ERROR: Command execution failed: " + e.getMessage() + "\nStack trace: " + sw.toString();
+        }
+    }
+
+    private String runCommand(String ansibleCmd) throws Exception {
+        System.out.println("\n=== ANSIBLE COMMAND EXECUTION ===");
+        System.out.println("Executing command: " + ansibleCmd);
+
+        ProcessBuilder processBuilder = new ProcessBuilder();
+        if (System.getProperty("os.name").toLowerCase().contains("win")) {
+            processBuilder.command("cmd.exe", "/c", ansibleCmd);
+        } else {
+            processBuilder.command("bash", "-c", ansibleCmd);
+        }
+        processBuilder.redirectErrorStream(true);
+
+        Process process = processBuilder.start();
+
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+                System.out.println("[ANSIBLE OUTPUT] " + line);
+            }
+        }
+
+        int exitCode = process.waitFor();
+        System.out.println("Command completed with exit code: " + exitCode);
+
+        if (exitCode == 0) {
+            return "SUCCESS: Command executed successfully.\nOutput:\n" + output;
+        } else {
+            return String.format("ERROR: Command failed with exit code %d.\nOutput:\n%s", exitCode, output);
+        }
+    }
+}
